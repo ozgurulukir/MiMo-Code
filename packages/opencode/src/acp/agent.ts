@@ -186,318 +186,320 @@ export class Agent implements ACPAgent {
 
   private async handleEvent(event: Event) {
     switch (event.type) {
-      case "permission.asked": {
-        const permission = event.properties
-        const session = this.sessionManager.tryGet(permission.sessionID)
-        if (!session) return
+      case "permission.asked":
+        return this.handlePermissionAsked(event.properties)
+      case "message.part.updated":
+        return this.handleMessagePartUpdated(event.properties)
+      case "message.part.delta":
+        return this.handleMessagePartDelta(event.properties)
+    }
+  }
 
-        const prev = this.permissionQueues.get(permission.sessionID) ?? Promise.resolve()
-        const next = prev
-          .then(async () => {
-            const directory = session.cwd
+  private async handlePermissionAsked(permission: Extract<Event, { type: "permission.asked" }>["properties"]) {
+    const session = this.sessionManager.tryGet(permission.sessionID)
+    if (!session) return
 
-            const res = await this.connection
-              .requestPermission({
-                sessionId: permission.sessionID,
-                toolCall: {
-                  toolCallId: permission.tool?.callID ?? permission.id,
-                  status: "pending",
-                  title: permission.permission,
-                  rawInput: permission.metadata,
-                  kind: toToolKind(permission.permission),
-                  locations: toLocations(permission.permission, permission.metadata),
-                },
-                options: this.permissionOptions,
-              })
-              .catch(async (error) => {
-                log.error("failed to request permission from ACP", {
-                  error,
-                  permissionID: permission.id,
-                  sessionID: permission.sessionID,
-                })
-                await this.sdk.permission.reply({
-                  requestID: permission.id,
-                  reply: "reject",
-                  directory,
-                })
-                return undefined
-              })
+    const prev = this.permissionQueues.get(permission.sessionID) ?? Promise.resolve()
+    const next = prev
+      .then(async () => {
+        const directory = session.cwd
 
-            if (!res) return
-            if (res.outcome.outcome !== "selected") {
-              await this.sdk.permission.reply({
-                requestID: permission.id,
-                reply: "reject",
-                directory,
-              })
-              return
-            }
-
-            if (res.outcome.optionId !== "reject" && permission.permission == "edit") {
-              const metadata = permission.metadata || {}
-              const filepath = typeof metadata["filepath"] === "string" ? metadata["filepath"] : ""
-              const diff = typeof metadata["diff"] === "string" ? metadata["diff"] : ""
-              const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
-              const newContent = getNewContent(content, diff)
-
-              if (newContent) {
-                void this.connection.writeTextFile({
-                  sessionId: session.id,
-                  path: filepath,
-                  content: newContent,
-                })
-              }
-            }
-
+        const res = await this.connection
+          .requestPermission({
+            sessionId: permission.sessionID,
+            toolCall: {
+              toolCallId: permission.tool?.callID ?? permission.id,
+              status: "pending",
+              title: permission.permission,
+              rawInput: permission.metadata,
+              kind: toToolKind(permission.permission),
+              locations: toLocations(permission.permission, permission.metadata),
+            },
+            options: this.permissionOptions,
+          })
+          .catch(async (error) => {
+            log.error("failed to request permission from ACP", {
+              error,
+              permissionID: permission.id,
+              sessionID: permission.sessionID,
+            })
             await this.sdk.permission.reply({
               requestID: permission.id,
-              reply: res.outcome.optionId as "once" | "always" | "reject",
+              reply: "reject",
               directory,
             })
-          })
-          .catch((error) => {
-            log.error("failed to handle permission", { error, permissionID: permission.id })
-          })
-          .finally(() => {
-            if (this.permissionQueues.get(permission.sessionID) === next) {
-              this.permissionQueues.delete(permission.sessionID)
-            }
-          })
-        this.permissionQueues.set(permission.sessionID, next)
-        return
-      }
-
-      case "message.part.updated": {
-        log.info("message part updated", { event: event.properties })
-        const props = event.properties
-        const part = props.part
-        const session = this.sessionManager.tryGet(part.sessionID)
-        if (!session) return
-        const sessionId = session.id
-
-        if (part.type === "tool") {
-          await this.toolStart(sessionId, part)
-
-          switch (part.state.status) {
-            case "pending":
-              this.bashSnapshots.delete(part.callID)
-              return
-
-            case "running":
-              const output = this.bashOutput(part)
-              const content: ToolCallContent[] = []
-              if (output) {
-                const hash = Hash.fast(output)
-                if (part.tool === "bash") {
-                  if (this.bashSnapshots.get(part.callID) === hash) {
-                    await this.connection
-                      .sessionUpdate({
-                        sessionId,
-                        update: {
-                          sessionUpdate: "tool_call_update",
-                          toolCallId: part.callID,
-                          status: "in_progress",
-                          kind: toToolKind(part.tool),
-                          title: part.tool,
-                          locations: toLocations(part.tool, part.state.input),
-                          rawInput: part.state.input,
-                        },
-                      })
-                      .catch((error) => {
-                        log.error("failed to send tool in_progress to ACP", { error })
-                      })
-                    return
-                  }
-                  this.bashSnapshots.set(part.callID, hash)
-                }
-                content.push({
-                  type: "content",
-                  content: {
-                    type: "text",
-                    text: output,
-                  },
-                })
-              }
-              await this.connection
-                .sessionUpdate({
-                  sessionId,
-                  update: {
-                    sessionUpdate: "tool_call_update",
-                    toolCallId: part.callID,
-                    status: "in_progress",
-                    kind: toToolKind(part.tool),
-                    title: part.tool,
-                    locations: toLocations(part.tool, part.state.input),
-                    rawInput: part.state.input,
-                    ...(content.length > 0 && { content }),
-                  },
-                })
-                .catch((error) => {
-                  log.error("failed to send tool in_progress to ACP", { error })
-                })
-              return
-
-            case "completed": {
-              this.toolStarts.delete(part.callID)
-              this.bashSnapshots.delete(part.callID)
-              const kind = toToolKind(part.tool)
-              const content: ToolCallContent[] = [
-                {
-                  type: "content",
-                  content: {
-                    type: "text",
-                    text: part.state.output,
-                  },
-                },
-              ]
-
-              if (kind === "edit") {
-                const input = part.state.input
-                const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
-                const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
-                const newText =
-                  typeof input["newString"] === "string"
-                    ? input["newString"]
-                    : typeof input["content"] === "string"
-                      ? input["content"]
-                      : ""
-                content.push({
-                  type: "diff",
-                  path: filePath,
-                  oldText,
-                  newText,
-                })
-              }
-
-              await this.connection
-                .sessionUpdate({
-                  sessionId,
-                  update: {
-                    sessionUpdate: "tool_call_update",
-                    toolCallId: part.callID,
-                    status: "completed",
-                    kind,
-                    content,
-                    title: part.state.title,
-                    rawInput: part.state.input,
-                    rawOutput: {
-                      output: part.state.output,
-                      metadata: part.state.metadata,
-                    },
-                  },
-                })
-                .catch((error) => {
-                  log.error("failed to send tool completed to ACP", { error })
-                })
-              return
-            }
-            case "error":
-              this.toolStarts.delete(part.callID)
-              this.bashSnapshots.delete(part.callID)
-              await this.connection
-                .sessionUpdate({
-                  sessionId,
-                  update: {
-                    sessionUpdate: "tool_call_update",
-                    toolCallId: part.callID,
-                    status: "failed",
-                    kind: toToolKind(part.tool),
-                    title: part.tool,
-                    rawInput: part.state.input,
-                    content: [
-                      {
-                        type: "content",
-                        content: {
-                          type: "text",
-                          text: part.state.error,
-                        },
-                      },
-                    ],
-                    rawOutput: {
-                      error: part.state.error,
-                      metadata: part.state.metadata,
-                    },
-                  },
-                })
-                .catch((error) => {
-                  log.error("failed to send tool error to ACP", { error })
-                })
-              return
-          }
-        }
-
-        // ACP clients already know the prompt they just submitted, so replaying
-        // live user parts duplicates the message. We still replay user history in
-        // loadSession() and forkSession() via processMessage().
-        if (part.type !== "text" && part.type !== "file") return
-
-        return
-      }
-
-      case "message.part.delta": {
-        const props = event.properties
-        const session = this.sessionManager.tryGet(props.sessionID)
-        if (!session) return
-        const sessionId = session.id
-
-        const message = await this.sdk.session
-          .message(
-            {
-              sessionID: props.sessionID,
-              messageID: props.messageID,
-              directory: session.cwd,
-            },
-            { throwOnError: true },
-          )
-          .then((x) => x.data)
-          .catch((error) => {
-            log.error("unexpected error when fetching message", { error })
             return undefined
           })
 
-        if (!message || message.info.role !== "assistant") return
+        if (!res) return
+        if (res.outcome.outcome !== "selected") {
+          await this.sdk.permission.reply({
+            requestID: permission.id,
+            reply: "reject",
+            directory,
+          })
+          return
+        }
 
-        const part = message.parts.find((p) => p.id === props.partID)
-        if (!part) return
+        if (res.outcome.optionId !== "reject" && permission.permission == "edit") {
+          const metadata = permission.metadata || {}
+          const filepath = typeof metadata["filepath"] === "string" ? metadata["filepath"] : ""
+          const diff = typeof metadata["diff"] === "string" ? metadata["diff"] : ""
+          const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
+          const newContent = getNewContent(content, diff)
 
-        if (part.type === "text" && props.field === "text" && part.ignored !== true) {
+          if (newContent) {
+            void this.connection.writeTextFile({
+              sessionId: session.id,
+              path: filepath,
+              content: newContent,
+            })
+          }
+        }
+
+        await this.sdk.permission.reply({
+          requestID: permission.id,
+          reply: res.outcome.optionId as "once" | "always" | "reject",
+          directory,
+        })
+      })
+      .catch((error) => {
+        log.error("failed to handle permission", { error, permissionID: permission.id })
+      })
+      .finally(() => {
+        if (this.permissionQueues.get(permission.sessionID) === next) {
+          this.permissionQueues.delete(permission.sessionID)
+        }
+      })
+    this.permissionQueues.set(permission.sessionID, next)
+  }
+
+  private async handleMessagePartUpdated(props: Extract<Event, { type: "message.part.updated" }>["properties"]) {
+    log.info("message part updated", { event: props })
+    const part = props.part
+    const session = this.sessionManager.tryGet(part.sessionID)
+    if (!session) return
+    const sessionId = session.id
+
+    if (part.type === "tool") {
+      await this.toolStart(sessionId, part)
+
+      switch (part.state.status) {
+        case "pending":
+          this.bashSnapshots.delete(part.callID)
+          return
+
+        case "running": {
+          const output = this.bashOutput(part)
+          const content: ToolCallContent[] = []
+          if (output) {
+            const hash = Hash.fast(output)
+            if (part.tool === "bash") {
+              if (this.bashSnapshots.get(part.callID) === hash) {
+                await this.connection
+                  .sessionUpdate({
+                    sessionId,
+                    update: {
+                      sessionUpdate: "tool_call_update",
+                      toolCallId: part.callID,
+                      status: "in_progress",
+                      kind: toToolKind(part.tool),
+                      title: part.tool,
+                      locations: toLocations(part.tool, part.state.input),
+                      rawInput: part.state.input,
+                    },
+                  })
+                  .catch((error) => {
+                    log.error("failed to send tool in_progress to ACP", { error })
+                  })
+                return
+              }
+              this.bashSnapshots.set(part.callID, hash)
+            }
+            content.push({
+              type: "content",
+              content: {
+                type: "text",
+                text: output,
+              },
+            })
+          }
           await this.connection
             .sessionUpdate({
               sessionId,
               update: {
-                sessionUpdate: "agent_message_chunk",
-                messageId: props.messageID,
-                content: {
-                  type: "text",
-                  text: props.delta,
-                },
+                sessionUpdate: "tool_call_update",
+                toolCallId: part.callID,
+                status: "in_progress",
+                kind: toToolKind(part.tool),
+                title: part.tool,
+                locations: toLocations(part.tool, part.state.input),
+                rawInput: part.state.input,
+                ...(content.length > 0 && { content }),
               },
             })
             .catch((error) => {
-              log.error("failed to send text delta to ACP", { error })
+              log.error("failed to send tool in_progress to ACP", { error })
             })
           return
         }
 
-        if (part.type === "reasoning" && props.field === "text") {
+        case "completed": {
+          this.toolStarts.delete(part.callID)
+          this.bashSnapshots.delete(part.callID)
+          const kind = toToolKind(part.tool)
+          const content: ToolCallContent[] = [
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: part.state.output,
+              },
+            },
+          ]
+
+          if (kind === "edit") {
+            const input = part.state.input
+            const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
+            const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
+            const newText =
+              typeof input["newString"] === "string"
+                ? input["newString"]
+                : typeof input["content"] === "string"
+                  ? input["content"]
+                  : ""
+            content.push({
+              type: "diff",
+              path: filePath,
+              oldText,
+              newText,
+            })
+          }
+
           await this.connection
             .sessionUpdate({
               sessionId,
               update: {
-                sessionUpdate: "agent_thought_chunk",
-                messageId: props.messageID,
-                content: {
-                  type: "text",
-                  text: props.delta,
+                sessionUpdate: "tool_call_update",
+                toolCallId: part.callID,
+                status: "completed",
+                kind,
+                content,
+                title: part.state.title,
+                rawInput: part.state.input,
+                rawOutput: {
+                  output: part.state.output,
+                  metadata: part.state.metadata,
                 },
               },
             })
             .catch((error) => {
-              log.error("failed to send reasoning delta to ACP", { error })
+              log.error("failed to send tool completed to ACP", { error })
             })
+          return
         }
-        return
+        case "error":
+          this.toolStarts.delete(part.callID)
+          this.bashSnapshots.delete(part.callID)
+          await this.connection
+            .sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId: part.callID,
+                status: "failed",
+                kind: toToolKind(part.tool),
+                title: part.tool,
+                rawInput: part.state.input,
+                content: [
+                  {
+                    type: "content",
+                    content: {
+                      type: "text",
+                      text: part.state.error,
+                    },
+                  },
+                ],
+                rawOutput: {
+                  error: part.state.error,
+                  metadata: part.state.metadata,
+                },
+              },
+            })
+            .catch((error) => {
+              log.error("failed to send tool error to ACP", { error })
+            })
+          return
       }
+    }
+
+    // ACP clients already know the prompt they just submitted, so replaying
+    // live user parts duplicates the message. We still replay user history in
+    // loadSession() and forkSession() via processMessage().
+    if (part.type !== "text" && part.type !== "file") return
+    return
+  }
+
+  private async handleMessagePartDelta(props: Extract<Event, { type: "message.part.delta" }>["properties"]) {
+    const session = this.sessionManager.tryGet(props.sessionID)
+    if (!session) return
+    const sessionId = session.id
+
+    const message = await this.sdk.session
+      .message(
+        {
+          sessionID: props.sessionID,
+          messageID: props.messageID,
+          directory: session.cwd,
+        },
+        { throwOnError: true },
+      )
+      .then((x) => x.data)
+      .catch((error) => {
+        log.error("unexpected error when fetching message", { error })
+        return undefined
+      })
+
+    if (!message || message.info.role !== "assistant") return
+
+    const part = message.parts.find((p) => p.id === props.partID)
+    if (!part) return
+
+    if (part.type === "text" && props.field === "text" && part.ignored !== true) {
+      await this.connection
+        .sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            messageId: props.messageID,
+            content: {
+              type: "text",
+              text: props.delta,
+            },
+          },
+        })
+        .catch((error) => {
+          log.error("failed to send text delta to ACP", { error })
+        })
+      return
+    }
+
+    if (part.type === "reasoning" && props.field === "text") {
+      await this.connection
+        .sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            messageId: props.messageID,
+            content: {
+              type: "text",
+              text: props.delta,
+            },
+          },
+        })
+        .catch((error) => {
+          log.error("failed to send reasoning delta to ACP", { error })
+        })
     }
   }
 
