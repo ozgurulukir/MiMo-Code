@@ -8,6 +8,9 @@
 This repo is a **local fork** of `XiaomiMiMo/MiMo-Code`. We do NOT open PRs to upstream.
 We develop on `local` and periodically pull upstream changes.
 
+Upstream's default branch is `dev` (usually 1-2 commits ahead of `main`).
+We track `main` for stability — it receives the same changes slightly later.
+
 ### Branch layout
 
 | Branch          | Purpose                                                 |
@@ -39,6 +42,42 @@ git push origin local
 Use **merge** (not rebase) to avoid force-push and history rewriting.
 The `local` branch accumulates merge commits — this is expected and fine.
 
+## Common Commands
+
+```bash
+# Dev (from root)
+bun run dev                  # opencode CLI
+bun run dev:web              # web app (packages/app)
+bun run dev:console          # console app (packages/console/app)
+bun run dev:desktop          # desktop app (packages/desktop)
+
+# Tests (from package dirs, NOT root — root has a guard that exits 1)
+cd packages/opencode && bun test --timeout 30000
+
+# Lint (from root)
+bun run lint                 # oxlint
+
+# Typecheck (from root runs turbo across all packages; from package dir runs tsgo directly)
+bun typecheck                # root → turbo typecheck (12 packages, ~15s)
+cd packages/opencode && bun typecheck  # single package → tsgo --noEmit
+```
+
+### Pre-push hook
+
+`.husky/pre-push` runs `bun typecheck` (full turbo across all packages) on every push.
+It also checks that your Bun version matches `packageManager` in `package.json` (`bun@1.3.11`).
+
+### Local-only files (do not commit)
+
+These are excluded via `.git/info/exclude` (not `.gitignore` — keeps upstream PRs clean):
+
+- `.opencode/` — opencode agent configs
+- `.code-tandem/` — code analysis index
+- `_pm/` — PARA project management
+- `.mimocode-project-id` — local app state
+
+`.mimocode/` is in upstream's `.gitignore` already.
+
 ## Style Guide
 
 ### General Principles
@@ -61,6 +100,10 @@ const journal = await Bun.file(path.join(dir, "journal.json")).json()
 const journalPath = path.join(dir, "journal.json")
 const journal = await Bun.file(journalPath).json()
 ```
+
+### Formatting
+
+Prettier config (in root `package.json`): `semi: false`, `printWidth: 120`.
 
 ### Destructuring
 
