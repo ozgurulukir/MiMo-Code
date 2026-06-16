@@ -1,9 +1,43 @@
 - Always use superpowers skill instead of builtin plan mode.
 - To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - ALWAYS USE PARALLEL TOOLS WHEN APPLICABLE.
-- The default branch in this repo is `dev`.
-- Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
+
+## Git Workflow — Local Fork
+
+This repo is a **local fork** of `XiaomiMiMo/MiMo-Code`. We do NOT open PRs to upstream.
+We develop on `local` and periodically pull upstream changes.
+
+### Branch layout
+
+| Branch          | Purpose                                                 |
+| --------------- | ------------------------------------------------------- |
+| `upstream/main` | Read-only mirror of upstream `main`. Never commit here. |
+| `main`          | Tracks `upstream/main` (fetch only). Never commit here. |
+| `local`         | **Working branch.** All custom changes live here.       |
+
+### New development
+
+Work directly on `local`. No feature branches, no PRs — just commit and push:
+
+```bash
+git add -A && git commit -m "refactor: ..."
+git push origin local
+```
+
+### Sync with upstream
+
+When upstream releases new changes:
+
+```bash
+git fetch upstream
+git merge upstream/main
+# Resolve conflicts if any, then:
+git push origin local
+```
+
+Use **merge** (not rebase) to avoid force-push and history rewriting.
+The `local` branch accumulates merge commits — this is expected and fine.
 
 ## Style Guide
 
