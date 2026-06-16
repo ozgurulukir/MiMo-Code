@@ -1107,25 +1107,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (session.revert) {
         yield* revert.cleanup(session)
       }
-      const agent = yield* agents.get(input.agent)
-      if (!agent) {
-        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-        const error = new NamedError.Unknown({ message: `Agent not found: "${input.agent}".${hint}` })
-        yield* bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
-        throw error
-      }
-      const inputModel = input.modelRef
-        ? yield* provider
-            .resolveModelRef(input.modelRef)
-            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
-        : input.model
-      const agentModel = agent.modelRef
-        ? yield* provider
-            .resolveModelRef(agent.modelRef)
-            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
-        : agent.model
-      const model = inputModel ?? agentModel ?? (yield* lastModel(input.sessionID))
+      const { agent, model } = yield* resolveAgentAndModel({
+        agentName: input.agent,
+        sessionID: input.sessionID,
+        modelRef: input.modelRef,
+        model: input.model,
+      })
       const userMsg: MessageV2.User = {
         id: input.messageID ?? MessageID.ascending(),
         sessionID: input.sessionID,
@@ -1584,28 +1571,46 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return [{ ...part, messageID: info.id, sessionID: input.sessionID }]
     })
 
-    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
-      const agentName = input.agent || (yield* agents.defaultAgent())
-      const ag = yield* agents.get(agentName)
-      if (!ag) {
+    const resolveAgentAndModel = Effect.fnUntraced(function* (args: {
+      agentName: string
+      sessionID: SessionID
+      modelRef?: string
+      model?: { providerID: ProviderID; modelID: ModelID }
+    }) {
+      const agent = yield* agents.get(args.agentName)
+      if (!agent) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
         const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-        const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
-        yield* bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
+        const error = new NamedError.Unknown({ message: `Agent not found: "${args.agentName}".${hint}` })
+        yield* bus.publish(Session.Event.Error, { sessionID: args.sessionID, error: error.toObject() })
         throw error
       }
+      const inputModel = args.modelRef
+        ? yield* provider
+            .resolveModelRef(args.modelRef)
+            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
+        : args.model
+      const agentModel = agent.modelRef
+        ? yield* provider
+            .resolveModelRef(agent.modelRef)
+            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
+        : agent.model
+      const model = inputModel ?? agentModel ?? (yield* lastModel(args.sessionID))
+      return { agent, model, agentModel } as const
+    })
 
-      const inputModel = input.modelRef
-        ? yield* provider
-            .resolveModelRef(input.modelRef)
-            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
-        : input.model
-      const agentModel = ag.modelRef
-        ? yield* provider
-            .resolveModelRef(ag.modelRef)
-            .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
-        : ag.model
-      const model = inputModel ?? agentModel ?? (yield* lastModel(input.sessionID))
+    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+      const agentName = input.agent || (yield* agents.defaultAgent())
+      const {
+        agent: ag,
+        model,
+        agentModel,
+      } = yield* resolveAgentAndModel({
+        agentName,
+        sessionID: input.sessionID,
+        modelRef: input.modelRef,
+        model: input.model,
+      })
       const same = agentModel && model.providerID === agentModel.providerID && model.modelID === agentModel.modelID
       const full =
         !input.variant && ag.variant && same

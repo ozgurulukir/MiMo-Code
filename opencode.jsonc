@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "typegraph": {
+      "type": "local",
+      "command": [
+        "npx",
+        "tsx",
+        "/home/aristo/Projects/MiMo-Code/plugins/typegraph-mcp/server.ts"
+      ],
+      "cwd": "/home/aristo/Projects/MiMo-Code",
+      "environment": {
+        "TYPEGRAPH_PROJECT_ROOT": "/home/aristo/Projects/MiMo-Code",
+        "TYPEGRAPH_TSCONFIG": "/home/aristo/Projects/MiMo-Code/tsconfig.json"
+      },
+      "enabled": true
+    }
+  }
+}
