@@ -192,6 +192,13 @@ const log = Log.create({ service: "session.prompt" })
 function isExtensionPath(filePath: string): boolean {
   return /\/\.mimocode\/(tools?|skills?|hooks?)\//.test(filePath)
 }
+
+type BeforeOutput = { args: any; cancel?: boolean; cancelReason?: string }
+
+type ToolExecPhase<T> =
+  | { status: "proceed"; ctx: Tool.Context; beforeOutput: BeforeOutput; startTs: number }
+  | { status: "return"; output: T }
+
 const elog = EffectLogger.create({ service: "session.prompt" })
 
 export interface Interface {
@@ -671,6 +678,73 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             .pipe(Effect.orDie),
       })
 
+      // Shared pre-execute lifecycle: start logging, whitelist enforcement,
+      // plugin.before trigger (with mutable output for cancel / args mutation),
+      // and cancel path (with metrics + kind-specific completeToolCall). The
+      // callback handles execute + after trigger + success metrics + abort
+      // because builtin and MCP diverge on payload (output vs result),
+      // metrics source (output.output vs result.content), and ordering
+      // (MCP publishes metrics before content processing).
+      const beginToolExecution = <T>(
+        toolID: string,
+        kind: "builtin" | "mcp",
+        args: any,
+        options: ToolExecutionOptions | undefined,
+      ): Effect.Effect<ToolExecPhase<T>> =>
+        Effect.gen(function* () {
+          const startTs = Date.now()
+          const callID = options?.toolCallId ?? "?"
+          const ctx = context(args, options!)
+          const suffix = kind === "mcp" ? " (mcp)" : ""
+          log.debug(`tool execute start${suffix}`, { tool: toolID, callID, sessionID: input.session.id })
+          if (whitelist && !whitelist.has(toolID)) {
+            const rejection = rejectionFor(toolID)
+            const output = (kind === "mcp"
+              ? {
+                  title: rejection.title,
+                  metadata: rejection.metadata,
+                  output: rejection.output,
+                  attachments: [],
+                  content: [{ type: "text" as const, text: rejection.output }],
+                }
+              : rejection) as unknown as T
+            log.debug(`tool execute rejected${suffix}`, {
+              tool: toolID,
+              callID,
+              durationMs: Date.now() - startTs,
+            })
+            yield* input.processor.completeToolCall(options!.toolCallId, output as any)
+            return { status: "return", output }
+          }
+          const beforeOutput: BeforeOutput = { args }
+          yield* plugin.trigger(
+            "tool.execute.before",
+            { tool: toolID, sessionID: ctx.sessionID, callID: options?.toolCallId },
+            beforeOutput,
+          )
+          if (beforeOutput.cancel) {
+            const reason = beforeOutput.cancelReason || "Tool call cancelled by hook"
+            const output = (kind === "mcp"
+              ? { content: [{ type: "text" as const, text: reason }] }
+              : { title: "Cancelled", output: reason, metadata: { cancelled: true } }) as unknown as T
+            yield* bus
+              .publish(Metrics.ToolCall, {
+                sessionID: ctx.sessionID,
+                tool_name: toolID,
+                input_bytes: Metrics.jsonByteLength(beforeOutput.args),
+                output_bytes: 0,
+                tool_call_id: options!.toolCallId,
+                tool_call_status: "cancelled",
+              })
+              .pipe(Effect.ignore)
+            if (kind === "builtin") {
+              yield* input.processor.completeToolCall(options!.toolCallId, output as any)
+            }
+            return { status: "return", output }
+          }
+          return { status: "proceed", ctx, beforeOutput, startTs }
+        })
+
       for (const item of yield* registry.tools({
         modelID: ModelID.make(input.model.api.id),
         providerID: input.model.providerID,
@@ -683,49 +757,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           execute(args, options) {
             return run.promise(
               Effect.gen(function* () {
-                const startTs = Date.now()
+                const phase = yield* beginToolExecution(item.id, "builtin", args, options)
+                if (phase.status === "return") return phase.output
+                const { ctx, beforeOutput, startTs } = phase
                 const callID = options?.toolCallId ?? "?"
-                log.debug("tool execute start", {
-                  tool: item.id,
-                  callID,
-                  sessionID: input.session.id,
-                })
-                const ctx = context(args, options)
-                if (whitelist && !whitelist.has(item.id)) {
-                  const output = rejectionFor(item.id)
-                  log.debug("tool execute rejected", {
-                    tool: item.id,
-                    callID,
-                    durationMs: Date.now() - startTs,
-                  })
-                  yield* input.processor.completeToolCall(options.toolCallId, output)
-                  return output
-                }
-                const beforeOutput: { args: any; cancel?: boolean; cancelReason?: string } = { args }
-                yield* plugin.trigger(
-                  "tool.execute.before",
-                  { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
-                  beforeOutput,
-                )
-                if (beforeOutput.cancel) {
-                  const cancelOutput = {
-                    title: "Cancelled",
-                    output: beforeOutput.cancelReason || "Tool call cancelled by hook",
-                    metadata: { cancelled: true },
-                  }
-                  yield* bus
-                    .publish(Metrics.ToolCall, {
-                      sessionID: ctx.sessionID,
-                      tool_name: item.id,
-                      input_bytes: Metrics.jsonByteLength(beforeOutput.args),
-                      output_bytes: 0,
-                      tool_call_id: options.toolCallId,
-                      tool_call_status: "cancelled",
-                    })
-                    .pipe(Effect.ignore)
-                  yield* input.processor.completeToolCall(options.toolCallId, cancelOutput)
-                  return cancelOutput
-                }
                 const result = yield* item.execute(beforeOutput.args, ctx)
                 log.debug("tool execute done", {
                   tool: item.id,
@@ -752,7 +787,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   beforeOutput.args?.filePath &&
                   isExtensionPath(beforeOutput.args.filePath)
                 ) {
-                  yield* registry.reload().pipe(Effect.tapError((err) => Effect.sync(() => log.warn("extension reload failed", { error: err }))), Effect.ignore)
+                  yield* registry.reload().pipe(
+                    Effect.tapError((err) => Effect.sync(() => log.warn("extension reload failed", { error: err }))),
+                    Effect.ignore,
+                  )
                 }
                 yield* bus
                   .publish(Metrics.ToolCall, {
@@ -760,11 +798,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     tool_name: item.id,
                     input_bytes: Metrics.jsonByteLength(beforeOutput.args),
                     output_bytes: Buffer.byteLength(output.output ?? "", "utf8"),
-                    tool_call_id: options.toolCallId,
+                    tool_call_id: options!.toolCallId,
                     tool_call_status: "success",
                   })
                   .pipe(Effect.ignore)
-                if (options.abortSignal?.aborted) {
+                if (options?.abortSignal?.aborted) {
                   yield* input.processor.completeToolCall(options.toolCallId, output)
                 }
                 return output
@@ -784,56 +822,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         item.execute = (args, opts) =>
           run.promise(
             Effect.gen(function* () {
-              const startTs = Date.now()
+              const phase = yield* beginToolExecution(key, "mcp", args, opts)
+              if (phase.status === "return") return phase.output
+              const { ctx, beforeOutput, startTs } = phase
               const callID = opts?.toolCallId ?? "?"
-              log.debug("tool execute start (mcp)", {
-                tool: key,
-                callID,
-                sessionID: input.session.id,
-              })
-              const ctx = context(args, opts)
-              if (whitelist && !whitelist.has(key)) {
-                const rejection = rejectionFor(key)
-                const output = {
-                  title: rejection.title,
-                  metadata: rejection.metadata,
-                  output: rejection.output,
-                  attachments: [],
-                  content: [{ type: "text" as const, text: rejection.output }],
-                }
-                log.debug("tool execute rejected (mcp)", {
-                  tool: key,
-                  callID,
-                  durationMs: Date.now() - startTs,
-                })
-                yield* input.processor.completeToolCall(opts.toolCallId, output)
-                return output
-              }
-              const mcpBeforeOutput: { args: any; cancel?: boolean; cancelReason?: string } = { args }
-              yield* plugin.trigger(
-                "tool.execute.before",
-                { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
-                mcpBeforeOutput,
-              )
-              if (mcpBeforeOutput.cancel) {
-                const cancelResult = {
-                  content: [{ type: "text" as const, text: mcpBeforeOutput.cancelReason || "Tool call cancelled by hook" }],
-                }
-                yield* bus
-                  .publish(Metrics.ToolCall, {
-                    sessionID: ctx.sessionID,
-                    tool_name: key,
-                    input_bytes: Metrics.jsonByteLength(mcpBeforeOutput.args),
-                    output_bytes: 0,
-                    tool_call_id: opts.toolCallId,
-                    tool_call_status: "cancelled",
-                  })
-                  .pipe(Effect.ignore)
-                return cancelResult
-              }
               yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
               const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.promise(() =>
-                execute(mcpBeforeOutput.args, opts),
+                execute(beforeOutput.args, opts),
               )
               log.debug("tool execute done (mcp)", {
                 tool: key,
@@ -843,7 +838,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
               yield* plugin.trigger(
                 "tool.execute.after",
-                { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+                { tool: key, sessionID: ctx.sessionID, callID: opts!.toolCallId, args },
                 result,
               )
 
@@ -854,7 +849,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   tool_name: key,
                   input_bytes: Metrics.jsonByteLength(args),
                   output_bytes: Metrics.jsonByteLength(result.content ?? ""),
-                  tool_call_id: opts.toolCallId,
+                  tool_call_id: opts!.toolCallId,
                   tool_call_status: "success",
                 })
                 .pipe(Effect.ignore)
@@ -900,7 +895,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 })),
                 content: result.content,
               }
-              if (opts.abortSignal?.aborted) {
+              if (opts?.abortSignal?.aborted) {
                 yield* input.processor.completeToolCall(opts.toolCallId, output)
               }
               return output
@@ -3030,8 +3025,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   })
                   break
                 }
-                const recoveryText =
-                  textLoopRecoveryAttempts === 0 ? RECOVERY_PROMPT_MILD : RECOVERY_PROMPT_STRONG
+                const recoveryText = textLoopRecoveryAttempts === 0 ? RECOVERY_PROMPT_MILD : RECOVERY_PROMPT_STRONG
                 // Create a NEW user message at the end of conversation (not append to original)
                 const reentry = yield* sessions.updateMessage({
                   id: MessageID.ascending(),
