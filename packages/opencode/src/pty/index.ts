@@ -121,11 +121,11 @@ export const layer = Layer.effect(
     function teardown(session: Active) {
       try {
         session.process.kill()
-      } catch {}
+      } catch (_) {}
       for (const [sub, ws] of session.subscribers.entries()) {
         try {
           if (sock(ws) === sub) ws.close()
-        } catch {}
+        } catch (_) {}
       }
       session.subscribers.clear()
     }
@@ -239,7 +239,7 @@ export const layer = Layer.effect(
             }
             try {
               ws.send(chunk)
-            } catch {
+            } catch (_) {
               session.subscribers.delete(key)
             }
           }
@@ -329,7 +329,7 @@ export const layer = Layer.effect(
           for (let i = 0; i < data.length; i += BUFFER_CHUNK) {
             ws.send(data.slice(i, i + BUFFER_CHUNK))
           }
-        } catch {
+        } catch (_) {
           cleanup()
           ws.close()
           return
@@ -338,7 +338,7 @@ export const layer = Layer.effect(
 
       try {
         ws.send(meta(end))
-      } catch {
+      } catch (_) {
         cleanup()
         ws.close()
         return

@@ -14,7 +14,7 @@ export async function exists(p: string): Promise<boolean> {
 export async function isDir(p: string): Promise<boolean> {
   try {
     return statSync(p).isDirectory()
-  } catch {
+  } catch (_) {
     return false
   }
 }
@@ -115,7 +115,7 @@ export function normalizePath(p: string): string {
   const resolved = win32.normalize(win32.resolve(windowsPath(p)))
   try {
     return realpathSync.native(resolved)
-  } catch {
+  } catch (_) {
     return resolved
   }
 }
@@ -231,7 +231,7 @@ export async function globUp(pattern: string, start: string, stop?: string) {
         dot: true,
       })
       result.push(...matches)
-    } catch {
+    } catch (_) {
       // Skip invalid glob patterns
     }
     if (stop === current) break

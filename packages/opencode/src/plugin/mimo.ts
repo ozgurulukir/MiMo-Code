@@ -16,7 +16,7 @@ function getKeyName(): string {
   try {
     const existing = fs.readFileSync(filePath, "utf-8").trim()
     if (existing) return existing
-  } catch {}
+  } catch (_) {}
   const name = `mimo-code-cli-key-${crypto.randomBytes(4).toString("hex")}`
   fs.writeFileSync(filePath, name)
   return name
@@ -177,7 +177,7 @@ export async function MimoAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     const metadata: Record<string, string> = { uid: result.uid }
                     if (result.url) metadata.base_url = result.url
                     return { type: "success" as const, key: result.sk ?? "", metadata }
-                  } catch {
+                  } catch (_) {
                     return { type: "failed" as const }
                   }
                 }
@@ -187,7 +187,7 @@ export async function MimoAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   const metadata: Record<string, string> = { uid: result.uid }
                   if (result.url) metadata.base_url = result.url
                   return { type: "success" as const, key: result.sk ?? "", metadata }
-                } catch {
+                } catch (_) {
                   server.close()
                   return { type: "failed" as const }
                 }
