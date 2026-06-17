@@ -42,6 +42,33 @@ git push origin local
 Use **merge** (not rebase) to avoid force-push and history rewriting.
 The `local` branch accumulates merge commits — this is expected and fine.
 
+### Merge Policy
+
+All PRs must target the **`local`** branch. PRs targeting `main` will be closed unmerged.
+
+**Before merging, every PR must:**
+
+1. Pass `bun typecheck` (full turbo across all packages)
+2. Pass relevant tests (`bun test` from the package directory)
+3. Not include unrelated changes (no lockfile drift, no formatting-only commits mixed with logic)
+4. Not add `as any` casts or `catch {}` blocks without justification
+
+**Test quality:**
+
+- Tests should verify observable behavior, not implementation internals
+- Avoid counter-based mocks that couple to internal call ordering
+- Use descriptive test names (present-tense sentences)
+
+**Code changes in "test" PRs:**
+
+- If a test PR also modifies source code, the code change must be reviewed independently
+- A "test-only" PR must not silently change production behavior
+
+**Bot PRs (e.g. Jules):**
+
+- Bot PRs are not auto-merged — require manual review
+- Bot PRs must follow the same rules as human PRs
+
 ## Common Commands
 
 ```bash
