@@ -306,6 +306,7 @@ export const PersistTesting = {
   localStorageWithPrefix,
   normalize,
   workspaceStorage,
+  parse,
 }
 
 export const Persist = {

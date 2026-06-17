@@ -112,4 +112,9 @@ describe("persist localStorage resilience", () => {
     expect(result.endsWith(".dat")).toBeTrue()
     expect(/[:\\/]/.test(result)).toBeFalse()
   })
+
+  test("parse handles invalid JSON gracefully", () => {
+    const result = persistTesting.parse("{ invalid: json }")
+    expect(result).toBeUndefined()
+  })
 })
