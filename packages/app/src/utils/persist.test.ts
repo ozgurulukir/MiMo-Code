@@ -112,4 +112,28 @@ describe("persist localStorage resilience", () => {
     expect(result.endsWith(".dat")).toBeTrue()
     expect(/[:\\/]/.test(result)).toBeFalse()
   })
+
+  test("getItem disables failing scope and returns null when storage throws", () => {
+    const bad = persistTesting.localStorageWithPrefix("opencode.throw.get")
+
+    // MemoryStorage is mocked to throw when key starts with opencode.throw
+    expect(bad.getItem("value")).toBeNull()
+
+    // Since scope is disabled, setItem should not try to touch the storage
+    const before = storage.calls.set
+    bad.setItem("value", '{"value":2}')
+    expect(storage.calls.set).toBe(before)
+  })
+
+  test("localStorageDirect getItem disables scope and returns null when storage throws", () => {
+    const direct = persistTesting.localStorageDirect()
+
+    // MemoryStorage throws on 'opencode.throw' for any method
+    expect(direct.getItem("opencode.throw.direct")).toBeNull()
+
+    // Subsequent setItem on same scope ('direct') shouldn't touch storage
+    const before = storage.calls.set
+    direct.setItem("opencode.throw.direct", '{"value":2}')
+    expect(storage.calls.set).toBe(before)
+  })
 })
