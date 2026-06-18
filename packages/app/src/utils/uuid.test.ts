@@ -75,4 +75,13 @@ describe("uuid", () => {
     setRandom(() => 0.5)
     expect(uuid()).toBe("8")
   })
+
+  test("falls back when accessing crypto throws", () => {
+    Object.defineProperty(globalThis, "crypto", {
+      get: () => { throw new Error("Crypto access denied") },
+      configurable: true,
+    })
+    setRandom(() => 0.5)
+    expect(uuid()).toBe("8")
+  })
 })
