@@ -343,4 +343,9 @@ describe("persist localStorage resilience", () => {
 
     storage.setItem = originalSetItem
   })
+
+  test("parse handles invalid JSON gracefully", () => {
+    const result = persistTesting.parse("{ invalid: json }")
+    expect(result).toBeUndefined()
+  })
 })
